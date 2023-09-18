@@ -1,16 +1,21 @@
 from flask import Flask, request, jsonify
+from flask_restful import Resource, Api, reqparse, abort
 from flask_sqlalchemy import SQLAlchemy
 from flask_marshmallow import Marshmallow
 from flask_cors import CORS
+
 from datetime import datetime
 import os
 
-# Initialize app
-app = Flask(__name__)
+app = Flask("WorkoutAPI")
+api = Api(app)
 CORS(app)
 basedir = os.path.abspath(os.path.dirname(__file__))
 
 CORS(app, origins=["http://localhost:3000"])
+
+parser = reqparse.RequestParser()
+parser.add_argument('title', required=True)
 
 # Database
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'db.sqlite')
@@ -18,30 +23,17 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 #Init db       
 db = SQLAlchemy(app)
-# Init ma
 ma = Marshmallow(app)
 
-# Workout Class/Model
-class Users(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(100), nullable=False)
-    password = db.Column(db.String(100), nullable=False)
-    workouts = db.relationship("Workout", backref="users")
-
-    def __init__(self, username, password):
-        self.username = username
-        self.password = password
-
+# Workout Model
 class Workout(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(100), nullable=False)
     date = db.Column(db.DateTime, default=datetime.now)
     exercises = db.relationship("Exercise", backref="workout")
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'))
 
-    def __init__(self, title, date):
+    def __init__(self, title):
         self.title = title
-        self.date = date
 
 class Exercise(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -49,8 +41,10 @@ class Exercise(db.Model):
     exercise_name = db.Column(db.String(100), nullable=False)
     sets = db.relationship("Sets", backref="exercise")
     
-    def __init__(self, exercise_name):
+    def __init__(self, exercise_name, workout_id):
         self.exercise_name = exercise_name
+        self.workout_id = workout_id
+
 
 class Sets(db.Model):
     id = db.Column(db.Integer, primary_key=True, nullable=True)
@@ -58,16 +52,10 @@ class Sets(db.Model):
     reps = db.Column(db.Integer, nullable=False)
     weight = db.Column(db.Integer, nullable=False)
 
-    def __init__(self, reps, weight):
+    def __init__(self, reps, weight, exercise_id):
         self.reps = reps
         self.weight = weight
-
-
-# Workout Schema
-class UserSchema(ma.SQLAlchemyAutoSchema):
-    class Meta:
-        model = Users
-        include_fk = True
+        self.exercise_id = exercise_id
 
 class WorkoutSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
@@ -84,122 +72,149 @@ class SetsSchema(ma.SQLAlchemyAutoSchema):
         model = Sets
         include_fk = True
 
-user_schema = UserSchema()
-users_schema = UserSchema(many=True)
+db.create_all()
+Workout_schema = WorkoutSchema()
+Exercies_schema = ExerciseSchema()
+Sets_schema = SetsSchema()
 
-workout_schema = WorkoutSchema()
-workouts_schema = WorkoutSchema(many=True)
+@app.route('/workout', methods=['POST'])
+def post_workout():
+    args = parser.parse_args()
+    title = args['title']
 
-exercise_schema = ExerciseSchema()
-exercises_schema = ExerciseSchema(many=True)
-
-set_schema = SetsSchema()
-sets_schema = SetsSchema(many=True)
-
-# Create a Workout
-
-@app.route('/user', methods=['POST'])
-def add_user():
-    data = request.get_json()
-
-    username = data['username']
-    password = data['password']
-
-    new_user = Users(username, password)
-
-    db.session.add(new_user)
-    db.session.commit()
-
-    return user_schema.jsonify(new_user)
-
-@app.route('/user/<user_id>/workouts', methods=['POST'])
-def add_workout(user_id):
-
-    user = Users.query.get(user_id)
-
-    workoutData = request.get_json()
-
-    title = workoutData['title']
-    new_workout = Workout(title=title, date=datetime.now())
-    user.workouts.append(new_workout)
-
+    new_workout = Workout(title = title)
     db.session.add(new_workout)
     db.session.commit()
 
-    return workout_schema.jsonify(new_workout)
+    serialized_workout = Workout_schema.dump(new_workout)
+    return jsonify(serialized_workout), 201
 
-@app.route('/workouts/<workout_id>/exercises', methods=['POST'])
-def add_exercises(workout_id):
+@app.route('/workout/<workout_id>', methods=['GET'])
+def get_workout(workout_id):
+    if workout_id == "all":
+        # Return all workouts
+        workouts = Workout.query.all()
+        serialized_workouts = [Workout_schema.dump(workout) for workout in workouts]
+        return jsonify(serialized_workouts)
+    
+    # Find a specific workout by ID
     workout = Workout.query.get(workout_id)
+    if not workout:
+        abort(404, message=f"Workout with ID {workout_id} not found")
 
-    exerciseData = request.json
+    # Serialize and return the specific workout
+    serialized_workout = Workout_schema.dump(workout)
+    return jsonify(serialized_workout)
 
-    exercise_name = exerciseData['exercise_name']
+@app.route('/workout/<workout_id>', methods=["DELETE"])
+def delete_workout(workout_id):
+    workout = Workout.query.get(workout_id)
+    if not workout:
+        abort(404, message=f"Workout with ID {workout_id} not found")
+    db.session.delete(workout)
+    db.session.commit()
 
-    new_exercise = Exercise(exercise_name)
-    workout.exercises.append(new_exercise)
+    return jsonify({"message": f"Workout with ID {workout_id} has been deleted"}), 200
+    
+@app.route('/workout/exercises/<workout_id>/<exercise_id>', methods=["GET"])
+def get_exercise(workout_id, exercise_id):
+    workout = Workout.query.get(workout_id)
+    
+    if exercise_id == "all":
+        if not workout:
+            abort(404, message=f"Workout with ID {workout_id} not found")
 
+        exercises = Exercise.query.filter_by(workout_id=workout.id).all()
+        serialized_exercises = [ExerciseSchema().dump(exercise) for exercise in exercises]
+        return jsonify(serialized_exercises)
+    
+    exercise = Exercise.query.get(exercise_id)
+
+    if not workout:
+        abort(404, message=f"Workout with ID {workout_id} not found")
+
+    if not exercise or exercise.workout_id != workout.id:
+        abort(404, message=f"Exercise with ID {exercise_id} not found in Workout with ID {workout_id}")
+
+    serialized_exercise = ExerciseSchema().dump(exercise)
+    return jsonify(serialized_exercise)
+
+@app.route('/workout/exercises/<workout_id>', methods=["POST"])
+def post_exercise(workout_id):
+    workout = Workout.query.get(workout_id)
+    if not workout:
+        abort(404, message=f"Workout with ID {workout_id} not found")
+
+    # Use request.get_json() to parse JSON data from the request body
+    data = request.get_json()
+    exercise_name = data.get('exercise_name')
+
+    new_exercise = Exercise(exercise_name=exercise_name, workout_id=workout.id)
     db.session.add(new_exercise)
     db.session.commit()
 
-    return exercise_schema.jsonify(new_exercise)
+    serialized_exercise = ExerciseSchema().dump(new_exercise)
+    return jsonify(serialized_exercise), 201
 
-@app.route('/exercises/<exercise_id>/sets', methods=['Post'])
-def add_sets(exercise_id):
+@app.route('/workout/exercises/<workout_id>/<exercise_id>', methods=["DELETE"])
+def delete_exercise(workout_id, exercise_id):
+    workout = Workout.query.get(workout_id)
     exercise = Exercise.query.get(exercise_id)
+    if not workout:
+        abort(404, message=f"Workout with ID {workout_id} not found")
 
-    reps = request.json['reps']
-    weight = request.json['weight']
+    if not exercise or exercise.workout_id != workout.id:
+        abort(404, message=f"Exercise with ID {exercise_id} not found in Workout with ID {workout_id}")        
 
-    new_set = Sets(reps, weight)
-    exercise.sets.append(new_set)
+    db.session.delete(exercise)
+    db.session.commit()
 
+    return jsonify({"message": f"Exercise with ID {exercise_id} has been deleted"}), 200
+
+@app.route('/workout/exercises/sets/<workout_id>/<exercise_id>', methods=['POST'])
+def post_set(workout_id, exercise_id):
+    exercise = Exercise.query.filter_by(workout_id=workout_id, id=exercise_id).first()
+
+    if not exercise:
+        abort(404, message=f"Exercise with ID {exercise_id} not found in Workout with ID {workout_id}")        
+
+    data = request.get_json()
+    reps = data.get('reps')
+    weight = data.get('weight')
+
+    new_set = Sets(reps = reps, weight = weight, exercise_id=exercise.id)
     db.session.add(new_set)
     db.session.commit()
 
-    return set_schema.jsonify(new_set)
+    serialized_set = SetsSchema().dump(new_set)
+    return jsonify(serialized_set), 201
 
-# Get all Products
-@app.route('/user', methods=['GET'])
-def get_users():
-    all_users = Users.query.all()
-    result = users_schema.dump(all_users)
-    return jsonify(result)
+@app.route('/workout/exercises/sets/<workout_id>/<exercise_id>/<set_id>', methods=["GET"])
+def get_set(workout_id, exercise_id, set_id):
+    exercise = Exercise.query.filter_by(workout_id=workout_id, id=exercise_id).first()
+    if set_id == "all":
+        sets = Sets.query.filter_by(exercise_id=exercise.id).all()
+        serialized_sets = [SetsSchema().dump(set) for set in sets]
+        return jsonify(serialized_sets)
+    
+    sets = Sets.query.get(set_id)
 
-@app.route('/user/<user_id>', methods=['GET'])
-def get_user(user_id):
-    single_user = Users.query.get(user_id)
-    result = user_schema.dump(single_user)
-    return jsonify(result)
+    if not exercise:
+        abort(404, message=f"Exercise with ID {exercise_id} not found in Workout with ID {workout_id}")
 
-@app.route('/user/<user_id>/workouts', methods=['GET'])
-def get_user_workouts(user_id):
-    user = Users.query.get(user_id)
+    serialized_sets = SetsSchema().dump(sets)
+    return jsonify(serialized_sets)
 
-    all_workouts = user.workouts
-    result = workouts_schema.dump(all_workouts)
-    return jsonify(result)
+@app.route('/workout/exercises/sets/<workout_id>/<exercise_id>/<set_id>', methods=["DELETE"])
+def delete_set(workout_id, exercise_id, set_id):
+    exercise = Exercise.query.filter_by(workout_id=workout_id, id=exercise_id).first()
+    set = Sets.query.get(set_id)
+    if not exercise:
+        abort(404, message=f"Exercise with ID {exercise_id} not found in Workout with ID {workout_id}")        
+    db.session.delete(set)
+    db.session.commit()
 
-@app.route('/workouts/<workout_id>/exercises', methods=['GET'])
-def get_exercises_for_workout(workout_id):
-    workout = Workout.query.get(workout_id)
+    return jsonify({"message": f"Set with ID {set_id} has been deleted"}), 200
 
-    all_exercises = workout.exercises
-    result = exercises_schema.dump(all_exercises)
-    return jsonify(result)
-
-@app.route('/exercises/<exercise_id>/sets', methods=['GET'])
-def get_sets_for_exercise(exercise_id):
-    exercise = Exercise.query.get(exercise_id)
-
-    all_sets = exercise.sets
-    result = sets_schema.dump(all_sets)
-    return jsonify(result)
-
-# Line Runs server in development mode
 if __name__ == '__main__':
-    db.create_all()
-    app.run(debug=True)
-
-
-
+    app.run()
